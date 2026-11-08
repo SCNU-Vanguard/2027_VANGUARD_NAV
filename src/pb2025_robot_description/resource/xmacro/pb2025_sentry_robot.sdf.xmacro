@@ -1,0 +1,372 @@
+<?xml version="1.0"?>
+<sdf version="1.7">
+
+    <!--include defination-->
+    <xmacro_include uri="model://rplidar_a2/model.sdf.xmacro" />
+    <xmacro_include uri="model://mid360/model.sdf.xmacro" />
+    <xmacro_include uri="model://industrial_camera/model.sdf.xmacro" />
+    <!-- 这里只复用 rm25_example_robot 里 include 的子模块宏：
+         small_armor_with_support / light_indicator / speed_monitor_17mm / chassis_wheel_l,r
+         不再使用 rm25_example_robot 整块机体宏（它把云台和弹仓写死在 33cm 以上） -->
+    <xmacro_include uri="model://rm25_example_robot/rm25_example_robot.def.xmacro" />
+    <!--property defination-->
+    <xmacro_define_value name="global_initial_color" value="none" />
+    <xmacro_define_value name="global_armor_sticker_type" value="num3" />
+    <!-- 底盘距离水平地面的高度（等于轮子半径，不能再低，否则轮子陷进地面） -->
+    <xmacro_define_value name="chassis_height" value="0.077" />
+    <!-- gimbal_yaw 相对于底盘的 z 轴安装偏移：-0.022 → 云台 yaw 座 0.055 m，整体埋进底盘 -->
+    <xmacro_define_value name="gimbal_yaw_height" value="-0.022" />
+    <!-- gimbal_pitch 相对于 gimbal_yaw 的高度差：0.055 → 俯仰轴 0.110 m -->
+    <xmacro_define_value name="gimbal_pitch_height" value="0.055" />
+    <!-- mid360 相对底盘的 z 偏移：0.131 → 雷达中心 0.208 m，扫描面 0.238 m（比原低矮版抬高 3 cm） -->
+    <xmacro_define_value name="livox_height" value="0.131" />
+
+    <!-- ===== 四周竖板（限界/护板）===== -->
+    <!-- 单块板：长 0.30 m × 厚 0.005 m × 高 0.10 m -->
+    <xmacro_define_value name="guard_panel_len" value="0.30" />
+    <xmacro_define_value name="guard_panel_h" value="0.10" />
+    <xmacro_define_value name="guard_panel_t" value="0.005" />
+    <!-- 相对两块板内表面间距 0.57 m，板厚 0.005 → 板中心各自偏 0.57/2 + 0.005/2 = 0.2875 -->
+    <xmacro_define_value name="guard_panel_offset" value="0.2875" />
+    <!-- 板中心高度取整车高度的一半：0.2404/2 = 0.120 m，相对底盘 0.120 - 0.077 = 0.043 -->
+    <xmacro_define_value name="guard_panel_z" value="0.043" />
+    <!-- 45° 斜板：把相邻两块板之间的角缝补上
+         端点从 (0.2875, 0.15) 连到 (0.15, 0.2875)，长度 = hypot(0.1375,0.1375) = 0.1945，
+         取 0.198 让两端各多压进竖板 ~1.8 mm，保证看不出缝 -->
+    <xmacro_define_value name="guard_corner_len" value="0.198" />
+    <!-- 斜板中心 = ((0.2875+0.15)/2, (0.2875+0.15)/2) -->
+    <xmacro_define_value name="guard_corner_offset" value="0.21875" />
+
+    <!--macro defination: 竖板（sx/sy/sz 为厚度方向/长边方向/高度）-->
+    <xmacro_define_block name="guard_panel" params="suffix pose sx sy sz">
+        <joint name="guard_panel${suffix}_joint" type="fixed">
+            <pose relative_to="chassis">${pose}</pose>
+            <parent>chassis</parent>
+            <child>guard_panel${suffix}</child>
+        </joint>
+        <link name="guard_panel${suffix}">
+            <!-- 必须显式声明：SDF 里 link 不写 pose 就落在模型坐标系原点（不跟随关节），
+                 写成 relative_to 关节的零位，位置才由上面的 joint pose 决定。 -->
+            <pose relative_to="guard_panel${suffix}_joint">0 0 0 0 0 0</pose>
+            <inertial>
+                <xmacro_block name="inertia_box" m="0.25" x="${sx}" y="${sy}" z="${sz}"/>
+            </inertial>
+            <visual name="visual">
+                <geometry>
+                    <box>
+                        <size>${sx} ${sy} ${sz}</size>
+                    </box>
+                </geometry>
+                <material>
+                    <ambient>0.02 0.02 0.02 1</ambient>
+                    <diffuse>0.04 0.04 0.04 1</diffuse>
+                    <specular>0.05 0.05 0.05 1</specular>
+                </material>
+            </visual>
+            <collision name="collision">
+                <geometry>
+                    <box>
+                        <size>${sx} ${sy} ${sz}</size>
+                    </box>
+                </geometry>
+            </collision>
+        </link>
+    </xmacro_define_block>
+
+    <!--
+      pb2025_sentry_robot —— 隧道低矮版
+      整车（含所有 collision / visual）最高点 0.240 m，可从 0.24 m 高的隧道地形下通过。
+      原版最高点 0.534 m（gimbal_pitch），弹仓碰撞盒 0.327 m、尾部灯条 0.257 m。
+      高度分配（世界系，base_footprint 贴地）：
+        轮子           0.001 ~ 0.153
+        底盘 collision 0.057 ~ 0.187（本体）、弹仓压到 0.177 ~ 0.207
+        装甲 0~3       0.067 ~ 0.197
+        尾部灯条       0.125 ~ 0.210（原 0.177 ~ 0.262）
+        gimbal_yaw     0.055 ~ 0.206（原 0.103 ~ 0.280，视觉网格 z 压 0.86 才塞得下）
+        gimbal_pitch   0.059 ~ 0.188（原 0.407 ~ 0.536）
+        测速模块       0.183 ~ 0.204（原 0.478 ~ 0.519）
+        mid360         0.176 ~ 0.240（抬高 3 cm 后成为整车最高点）
+        四周竖板       0.070 ~ 0.170（中心在车高一半 0.120）
+      注意：底盘视觉网格 chassis_base.dae 自带的尾部弹仓顶面在 0.253（世界 0.33 m），
+            那块网格无法单独裁掉，视觉上会穿过隧道顶棚，但物理碰撞已经压到 0.207 m。
+    -->
+    <model name="pb2025_sentry_robot">
+
+        <pose>0 0 0.15 0 0 0</pose>
+
+        <!-- ===== chassis ===== -->
+        <link name="base_footprint"/>
+        <joint name="base_to_chassis" type="fixed">
+            <pose>0 0 ${chassis_height} 0 0 0</pose>
+            <parent>base_footprint</parent>
+            <child>chassis</child>
+        </joint>
+
+        <link name="chassis">
+            <inertial>
+                <pose>0 0 0.055 0 0 0</pose>
+                <xmacro_block name="inertia_box" m="15.0" x="0.36" y="0.24" z="0.13"/>
+            </inertial>
+            <visual name="chassis_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://rmua19_standard_robot/meshes/chassis_base.dae</uri>
+                        <!-- 1 1 1：保留底盘原貌（尾部弹仓视觉顶面 0.33 m，会穿过隧道顶棚，但碰撞已压到 0.207 m）
+                             如果连视觉也要完全藏进 22 cm，把这里改成 1 1 0.55 -->
+                        <scale>1 1 1</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="chassis_base_collision">
+                <pose>0 0 0.045 0 0 0</pose>
+                <xmacro_block name="geometry_box" x="0.36" y="0.24" z="0.13"/>
+            </collision>
+            <!-- 隧道低矮版：弹仓碰撞盒从 0.104~0.250 压到 0.100~0.130（世界 0.177~0.207） -->
+            <collision name="chassis_projectile_container_collision">
+                <pose>-0.122 0 0.115 0 0 0</pose>
+                <xmacro_block name="geometry_box" x="0.1" y="0.18" z="0.030"/>
+            </collision>
+            <collision name="chassis_fornt_wheel_holder_collision">
+                <pose>0.208 0 0 0 0 0</pose>
+                <xmacro_block name="geometry_box" x="0.055" y="0.367" z="0.055"/>
+            </collision>
+            <collision name="chassis_rear_wheel_holder_collision">
+                <pose>-0.208 0 0 0 0 0</pose>
+                <xmacro_block name="geometry_box" x="0.055" y="0.367" z="0.055"/>
+            </collision>
+            <sensor name="chassis_imu" type="imu">
+                <always_on>1</always_on>
+                <update_rate>200</update_rate>
+            </sensor>
+        </link>
+        <!-- ===== 四轮 45° 布置 =====
+             轮心 (±0.194, ±0.194)，yaw 让轮盘面与相邻角板平行（轮轴沿角板法线）：
+               front_left  -45°   front_right +45°   rear_left -135°   rear_right +135°
+             z 必须保持 0：轮心在底盘系原点、半径 0.0758 → 轮底离地 1.2 mm，这就是整车离地基准。
+             几何上轮盘面到角板内面留 17.5 mm、到侧板留 21.4 mm，不会穿模；轮子最外点到
+             车体中心 0.306 m。 -->
+        <!--front_left wheel link and joint-->
+        <xmacro_block name="chassis_wheel_l" prefix="front_left" parent="chassis" pose="0.194 0.194 0 0 0 -${pi/4}"/>
+        <!--front_right wheel link and joint-->
+        <xmacro_block name="chassis_wheel_r" prefix="front_right" parent="chassis" pose="0.194 -0.194 0 0 0 ${pi/4}"/>
+        <!--rear_left wheel link and joint-->
+        <xmacro_block name="chassis_wheel_r" prefix="rear_left" parent="chassis" pose="-0.194 0.194 0 0 0 -${pi*3/4}"/>
+        <!--rear_right wheel link and joint-->
+        <xmacro_block name="chassis_wheel_l" prefix="rear_right" parent="chassis" pose="-0.194 -0.194 0 0 0 ${pi*3/4}"/>
+
+        <!-- ===== 四周竖板 =====
+             车头/车尾两块长边沿 y（30 cm），左右两块长边沿 x（30 cm）；
+             相对两块板内表面间距 57 cm，板中心高度 = 整车高度一半（0.120 m） -->
+        <xmacro_block name="guard_panel" suffix="_front"
+                      pose="${guard_panel_offset} 0 ${guard_panel_z} 0 0 0"
+                      sx="${guard_panel_t}" sy="${guard_panel_len}" sz="${guard_panel_h}"/>
+        <xmacro_block name="guard_panel" suffix="_rear"
+                      pose="-${guard_panel_offset} 0 ${guard_panel_z} 0 0 0"
+                      sx="${guard_panel_t}" sy="${guard_panel_len}" sz="${guard_panel_h}"/>
+        <xmacro_block name="guard_panel" suffix="_left"
+                      pose="0 ${guard_panel_offset} ${guard_panel_z} 0 0 0"
+                      sx="${guard_panel_len}" sy="${guard_panel_t}" sz="${guard_panel_h}"/>
+        <xmacro_block name="guard_panel" suffix="_right"
+                      pose="0 -${guard_panel_offset} ${guard_panel_z} 0 0 0"
+                      sx="${guard_panel_len}" sy="${guard_panel_t}" sz="${guard_panel_h}"/>
+
+        <!-- ===== 四块 45° 斜板：把相邻竖板之间的角缝连起来（同样 30/10/0.5 级别，黑色）===== -->
+        <!-- 前-左角 -->
+        <xmacro_block name="guard_panel" suffix="_corner_front_left"
+                      pose="${guard_corner_offset} ${guard_corner_offset} ${guard_panel_z} 0 0 ${pi/4}"
+                      sx="${guard_panel_t}" sy="${guard_corner_len}" sz="${guard_panel_h}"/>
+        <!-- 前-右角 -->
+        <xmacro_block name="guard_panel" suffix="_corner_front_right"
+                      pose="${guard_corner_offset} -${guard_corner_offset} ${guard_panel_z} 0 0 ${pi*3/4}"
+                      sx="${guard_panel_t}" sy="${guard_corner_len}" sz="${guard_panel_h}"/>
+        <!-- 后-右角 -->
+        <xmacro_block name="guard_panel" suffix="_corner_rear_right"
+                      pose="-${guard_corner_offset} -${guard_corner_offset} ${guard_panel_z} 0 0 ${-pi*3/4}"
+                      sx="${guard_panel_t}" sy="${guard_corner_len}" sz="${guard_panel_h}"/>
+        <!-- 后-左角 -->
+        <xmacro_block name="guard_panel" suffix="_corner_rear_left"
+                      pose="-${guard_corner_offset} ${guard_corner_offset} ${guard_panel_z} 0 0 ${-pi/4}"
+                      sx="${guard_panel_t}" sy="${guard_corner_len}" sz="${guard_panel_h}"/>
+
+        <!-- ===== gimbal odom chain（保持与原模型一致的结构，只是整体高度变了） ===== -->
+        <joint name="gimbal_yaw_odom_joint" type="revolute">
+            <pose relative_to='chassis'>0 0 ${gimbal_yaw_height} 0 0 0</pose>
+            <parent>chassis</parent>
+            <child>gimbal_yaw_odom</child>
+            <axis>
+                <xyz>0 0 1</xyz>
+                <limit>
+                    <effort>100</effort>
+                    <velocity>50</velocity>
+                    <lower>-1.79769e+308</lower>
+                    <upper>1.79769e+308</upper>
+                </limit>
+            </axis>
+        </joint>
+        <link name="gimbal_yaw_odom">
+            <pose relative_to="gimbal_yaw_odom_joint">0 0 0 0 0 0</pose>
+        </link>
+
+        <joint name="gimbal_pitch_odom_joint" type="fixed">
+            <pose relative_to='gimbal_yaw_odom'>0 0 ${gimbal_pitch_height} 0 0 0</pose>
+            <parent>gimbal_yaw_odom</parent>
+            <child>gimbal_pitch_odom</child>
+            <axis>
+                <xyz>0 1 0</xyz>
+                <limit>
+                    <effort>100</effort>
+                    <velocity>50</velocity>
+                    <lower>${-3.14*0.25}</lower>
+                    <upper>${3.14*0.18}</upper>
+                </limit>
+            </axis>
+        </joint>
+        <link name="gimbal_pitch_odom">
+            <pose relative_to="gimbal_pitch_odom_joint">0 0 0 0 0 0</pose>
+        </link>
+
+        <!-- ===== gimbal yaw module（塞进底盘内部，视觉网格 z 方向压到 0.86 才不顶穿底盘顶面） ===== -->
+        <joint name="gimbal_yaw_joint" type="revolute">
+            <pose relative_to='gimbal_pitch_odom'>0 0 -${gimbal_pitch_height} 0 0 0</pose>
+            <parent>gimbal_pitch_odom</parent>
+            <child>gimbal_yaw</child>
+            <axis>
+                <xyz>0 0 1</xyz>
+                <limit>
+                    <effort>100</effort>
+                    <velocity>50</velocity>
+                    <lower>-1.79769e+308</lower>
+                    <upper>1.79769e+308</upper>
+                </limit>
+            </axis>
+        </joint>
+        <link name="gimbal_yaw">
+            <pose relative_to="gimbal_yaw_joint">0 0 0 0 0 0</pose>
+            <inertial>
+                <pose>0 0 0.06 0 0 0</pose>
+                <xmacro_block name="inertia_cylinder" m="1.0" r="0.05" l="0.17"/>
+            </inertial>
+            <visual name="visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://rmua19_standard_robot/meshes/gimbal_yaw.dae</uri>
+                        <scale>1 1 0.86</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="collision">
+                <pose>0 0 0.075 0 0 0</pose>
+                <xmacro_block name="geometry_box" x="0.065" y="0.117" z="0.150"/>
+            </collision>
+        </link>
+
+        <!-- ===== gimbal pitch module（俯仰轴 0.110 m，炮管从底盘前脸探出一点） ===== -->
+        <joint name="gimbal_pitch_joint" type="revolute">
+            <pose relative_to='gimbal_yaw'>0 0 ${gimbal_pitch_height} 0 0 0</pose>
+            <parent>gimbal_yaw</parent>
+            <child>gimbal_pitch</child>
+            <axis>
+                <xyz>0 1 0</xyz>
+                <limit>
+                    <effort>100</effort>
+                    <lower>${-3.14*0.25}</lower>
+                    <upper>${3.14*0.18}</upper>
+                    <velocity>50</velocity>
+                </limit>
+            </axis>
+        </joint>
+        <link name="gimbal_pitch">
+            <pose relative_to="gimbal_pitch_joint">0 0 0 0 0 0</pose>
+            <inertial>
+                <pose>0.02 0 0 0 0 0</pose>
+                <xmacro_block name="inertia_box" m="0.5" x="0.25" y="0.09" z="0.10" />
+            </inertial>
+            <visual name="visual">
+                <xmacro_block name="geometry_mesh" uri="model://rmua19_standard_robot/meshes/gimbal_pitch.dae"/>
+            </visual>
+            <collision name="collision_main">
+                <pose>0.015 0 0 0 0 0</pose>
+                <xmacro_block name="geometry_box" x="0.1" y="0.0915" z="0.08"/>
+            </collision>
+            <collision name="collision_box">
+                <pose>-0.011 0 0.043 0 0 0</pose>
+                <xmacro_block name="geometry_box" x="0.14801" y="0.07" z="0.065"/>
+            </collision>
+            <sensor name="gimbal_imu" type="imu">
+                <always_on>1</always_on>
+                <update_rate>200</update_rate>
+            </sensor>
+        </link>
+
+        <!--for referee system -->
+        <!--front armors -->
+        <xmacro_block name="small_armor_with_support" suffix="_0" parent="chassis" sticker_type="${global_armor_sticker_type}" pose="0.197 0 0.061 0 0 0"/>
+        <!--left armors -->
+        <xmacro_block name="small_armor_with_support" suffix="_1" parent="chassis" sticker_type="${global_armor_sticker_type}" pose="0 0.116 0.061 0 0 1.5708"/>
+        <!--rear armors -->
+        <xmacro_block name="small_armor_with_support" suffix="_2" parent="chassis" sticker_type="${global_armor_sticker_type}" pose="-0.197 0 0.061 0 0 3.14"/>
+        <!--right armors -->
+        <xmacro_block name="small_armor_with_support" suffix="_3" parent="chassis" sticker_type="${global_armor_sticker_type}" pose="0 -0.116 0.061 0 0 -1.5708"/>
+        <!--light_indicator（原 0.1 → 0.048，顶面 0.210 m）-->
+        <xmacro_block name="light_indicator" suffix="" parent="chassis" pose="-0.207 0 0.048 0 0 0"/>
+        <!--speed_monitor_17mm（跟随俯仰，顶面 0.204 m）-->
+        <xmacro_block name="speed_monitor_17mm" suffix="" parent="gimbal_pitch" pose="0.07 0 0 0 0 0"/>
+
+        <!--livox：从底盘上方 0.435 降到 0.101，扫描面 0.208 m，是整车最高点 0.210 m-->
+        <xmacro_block name="livox" prefix="front_" parent="chassis" pose="0.0496 0.0936 ${livox_height} -${pi/12} 0 0" update_rate="10" samples="1875"/>
+        <!--industrial camera：跟随俯仰，0.155 m-->
+        <xmacro_block name="industrial_camera" prefix="front_" parent="gimbal_pitch" pose="0.1 0 0.045 0 0 0" update_rate="30" horizontal_fov="1" width="1920" height="1080"/>
+
+        <!--plugins-->
+        <!-- https://github.com/gazebosim/gz-sim/blob/ign-gazebo6/src/systems -->
+
+        <!--plugin for joint state sensor-->
+        <plugin filename="ignition-gazebo-joint-state-publisher-system" name="ignition::gazebo::systems::JointStatePublisher">
+        </plugin>
+
+        <!--plugin for light bar-->
+        <plugin filename="LightBarController" name="ignition::gazebo::systems::LightBarController">
+            <controller_name>color</controller_name>
+            <link_visual>armor_0/light_bar_visual</link_visual>
+            <link_visual>armor_1/light_bar_visual</link_visual>
+            <link_visual>armor_2/light_bar_visual</link_visual>
+            <link_visual>armor_3/light_bar_visual</link_visual>
+            <link_visual>light_indicator/light_bar_visual</link_visual>
+            <link_visual>speed_monitor/light_bar_visual</link_visual>
+            <initial_color>${global_initial_color}</initial_color>
+        </plugin>
+
+        <!--plugin for chassis control-->
+        <plugin filename="MecanumDrive2" name="ignition::gazebo::systems::MecanumDrive2">
+            <chassis_link>chassis</chassis_link>
+            <front_left_joint>front_left_wheel_joint</front_left_joint>
+            <front_right_joint>front_right_wheel_joint</front_right_joint>
+            <rear_left_joint>rear_left_wheel_joint</rear_left_joint>
+            <rear_right_joint>rear_right_wheel_joint</rear_right_joint>
+        </plugin>
+
+        <!--plugin for gimbal control-->
+        <plugin filename="ignition-gazebo-joint-controller-system" name="ignition::gazebo::systems::JointController">
+            <joint_name>gimbal_yaw_joint</joint_name>
+            <use_force_commands>false</use_force_commands>
+            <p_gain>0.2</p_gain>
+            <i_gain>0.01</i_gain>
+        </plugin>
+
+        <plugin filename="ignition-gazebo-joint-controller-system" name="ignition::gazebo::systems::JointController">
+            <joint_name>gimbal_pitch_joint</joint_name>
+            <use_force_commands>false</use_force_commands>
+            <p_gain>1</p_gain>
+            <i_gain>0.01</i_gain>
+        </plugin>
+
+        <!--plugin for shooter-->
+        <plugin filename="ProjectileShooter" name="ignition::gazebo::systems::ProjectileShooter">
+            <shooter_link>speed_monitor</shooter_link>
+            <shooter_offset>0.15 0 0 0 0 0</shooter_offset>
+            <shooter_name>small_shooter</shooter_name>
+            <projectile_velocity>20</projectile_velocity>
+            <projectile_uri>model://rm_projectile_17mm</projectile_uri>
+        </plugin>
+    </model>
+</sdf>

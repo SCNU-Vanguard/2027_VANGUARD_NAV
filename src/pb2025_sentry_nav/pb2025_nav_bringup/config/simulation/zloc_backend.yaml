@@ -1,0 +1,155 @@
+# Z-Localization 后端 · 仿真场景（方案二：保留 point_lio，只替换 map→odom 来源）
+#
+# 数据来源：point_lio → loam_interface → (lidar_odometry, registered_scan)
+#   - 两者同源同时刻（point_lio 的 /aft_mapped_to_init 与 /cloud_registered 同为 lidar_end_time）
+#   - registered_scan 已在 odom 系，因此 input_cloud_in_local_frame 必须为 false
+#   - sensor_frame 必须等于输入里程计的 child_frame_id（sensor_scan_generation 之外由
+#     loam_interface 发布，child = front_mid360）
+#
+# 不启用 UWB：本车无硬件支持。
+extends: ../../../../z-localization/config/backend.yaml
+
+common:
+  # 使用传统的「里程计 + 点云」分离输入，而不是 ZLIO 打包协议。
+  frontend: legacy
+  map_frame: map
+  odom_frame: odom
+  # 必须等于 lidar_odometry.header.child_frame_id。
+  sensor_frame: front_mid360
+
+  # 导航项目全链路在 red_standard_robot1 命名空间下，这里写绝对话题名。
+  odom_topic: /red_standard_robot1/lidar_odometry
+  sync_odom_topic: /red_standard_robot1/lidar_odometry
+  cloud_topic: /red_standard_robot1/registered_scan
+
+  # registered_scan 已经是 odom 系点云，后端会自行转回传感器系。
+  input_cloud_in_local_frame: false
+
+  odom_cloud_sync:
+    # 仿真 20 Hz 雷达，同步容差放宽到 0.1 s；实车建议回到 0.05 s。
+    max_interval: 0.1
+
+  # 描述子参数必须与 build_pcd_map_bundle 的 --sc-* 完全一致，
+  # 否则后端会因 "saved SC config does not match runtime config" 拒绝加载地图包。
+  scan_context:
+    lidar_height: 0.5
+
+  # 传感器 → 车体外参，取自 pb2025_robot_description：
+  #   base_to_chassis: z = 0.077
+  #   livox(prefix=front_) parent=chassis pose="0.0496 0.0936 0.435 -pi/12 0 0"
+  # 即雷达相对 base_footprint 为 (0.0496, 0.0936, 0.512)，横滚 -15°。
+  # 这是 URDF 理论值，未经实测标定；换实车前请用 body_calibration 重标。
+  body:
+    frame: base_footprint
+    rotation:
+      roll_deg: -15.0
+      pitch_deg: 0.0
+      yaw_deg: 0.0
+    offset:
+      x: -0.0496
+      y: -0.0936
+      z: -0.512
+
+prior_map:
+  # directory 由 launch 参数 prior_map:=<dir> 覆盖。
+  enabled: true
+  directory: ""
+  voxel_resolution: 0.15
+
+registration:
+  # 根因（2026-11-03 实测）：基线配置的 voxel_resolution=0.4 会给点云「造厚度」——
+  # 表面点被量化成 ±0.2 m 的薄板，局部 PCA 判不出平面，目标点里只有 20.8% 有有效平面，
+  # 于是 corr_ratio 天花板约 0.10（与实测 0.108 完全吻合），跟踪配准也没有足够约束，
+  # 会稳定滑到「偏 1.6°、偏 10 cm」的局部解。
+  # 复刻后端平面验收后的理想扫描支持率：
+  #   体素 0.40 → 0.093 ；0.30 → 0.710 ；0.20 → 0.928 ；0.15 → 0.935
+  # 因此这里用 0.20。
+  voxel_resolution: 0.20
+
+  # 体素修好之后支持率回到 0.9 量级（理想扫描），真实扫描打折后按 0.3 要求；
+  # 实车用真实建图的 bundle 请恢复基线 0.5 / 6。
+  min_correspondence_ratio: 0.3
+  min_coverage_sectors: 3
+
+  # 静止时状态协方差会缩得很小，残差里剩下的模型偏差会被算成几十倍标准差
+  # （之前 NIS=45~69，p≈1e-8），每帧都判 conflict 把校正丢掉。
+  # 给配准测量一个合理的地板噪声，避免"过度自信 → 一律拒收 → 位姿不动 → 重复报冲突"。
+  measurement_translation_std_floor: 0.03
+  measurement_rotation_std_floor_deg: 0.5
+  # 提高迭代上限，减少偶发「打满迭代仍未收敛 → model invalid → SUSPECT」。
+  # 实测（12:34 那次运行）：绝大多数帧 2~5 次迭代收敛，但有一帧 24 次打满（elapsed 182 ms）
+  # 仍未收敛（converged=false → likelihoodValid()=false → 状态机立即降 SUSPECT）。
+  # 正常帧耗时 8~18 ms，放宽到 32 只在难帧上多花约 30 ms，代价可接受。
+  max_iterations: 32
+
+tracking:
+  # 默认是 8 m / 11 关键帧。仿真里这个尺寸只覆盖得到近处地面和少量结构，
+  # 航向约束太弱，跟踪配准会稳定地滑到「偏 2°、偏 15 cm」的局部解
+  # （日志里 delta_t≈0.15 / delta_r≈2°，而重定位给的是 0.0005 m）。
+  # 放大到 12 m / 16 帧后 delta 降到 0.10 / 1.57°、rmse 0.181→0.122。
+  target_radius: 12.0
+  target_keyframes: 16
+  source:
+    # 累计窗口从 0.5 s 收到 0.3 s：仿真的里程计在静止时仍有抖动，
+    # 5 帧累计会把点云抹开，残差被抬到 0.18 左右。
+    max_time: 0.3
+
+startup_hint:
+  # 仿真出生点是已知的（gz_world.yaml: red_standard_robot1 在 (-10.10, 0, yaw=0)）。
+  # map 系的定义来自 nav2 的栅格图（origin [-3.60, -7.60]，560x302 @0.05 = 28.0x15.1 m，
+  # 正好是场地内墙范围），据此推出 世界→map 的平移是 (+10.40, -0.05)：
+  #   - 栅格图对称中心实测在 (10.400, -0.050)，即世界原点映射到这里；
+  #   - 场地内墙在世界 ±14.0，对应 map -3.60 / 24.40，两个方向都自洽。
+  # 所以出生位姿 = (-10.10+10.40, 0-0.05) = (0.30, -0.05)，不是 map 原点。
+  # 先验点云 rmuc_2026_mapframe.pcd 已按同一变换生成，故此处与之一致。
+  # 场地两侧高度对称，不给提示时描述子容易锁到镜像位置（实测锁到 x≈20.2）。
+  enabled: true
+  force_until_matched: true
+  x: 0.30
+  y: -0.05
+  # 后端把 hint 当作 map→sensor，而 map 的 z=0 是地面（base_footprint），
+  # 所以这里必须给雷达离地高度 0.512，给 0 会让初始猜测整整低 0.5 m。
+  z: 0.512
+  yaw_deg: 0.0
+
+uwb:
+  # 无 UWB 硬件。
+  enabled: false
+
+output:
+  legacy:
+    # 关闭旧接口：它会把 map→base_footprint 也发一遍，
+    # 与 map→odom→base_footprint 形成同一个子节点的两个父节点。
+    enabled: false
+    publish_tf: false
+    publish_pose: false
+    publish_twist: false
+    publish_path: false
+  world_cloud:
+    # 实时 map 系点云，RViz 里可直接看定位是否贴合先验图。
+    enabled: true
+    publish_period: 0.0
+    publish_initializing: false
+    publish_untrusted: false
+    topic: /localization/lio_world_cloud
+
+recovery:
+  # SUSPECT 时只在"最后可信位置"附近找。默认 30 m 会跨到场地镜像点
+  # （RMUC 前后对称，实测会锁到 x≈20.2），一旦锁错就是整场平移，
+  # RViz 里表现为车和点云一起瞬移/上天下地，然后反复重定位。
+  # 真的被搬走 >10 m 时交给 LOST（lost_search_radius 仍做全局搜索）。
+  suspect_search_radius: 10.0
+
+visualization:
+  # 指标标记等可视化默认关闭，需要时用 backend.launch.py 的 rviz:=true。
+  enabled: false
+  publish_prior_map: false
+  publish_runtime_map: false
+  publish_map_axes: false
+  publish_paths: false
+  publish_debug_registration: false
+
+trajectory:
+  # 仿真验证阶段不落盘，避免在 share 目录里写文件。
+  save_on_shutdown: false
+  save_global_pcd: false
